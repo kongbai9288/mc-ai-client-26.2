@@ -1,6 +1,5 @@
-name: Fetch MC 26.2 Deps
+name: Fetch MC 26.2 Full Deps
 
-# 抓取 MC 26.2 未混淆 client jar + 编译期依赖，供本地 javac 类型校验使用
 on:
   workflow_dispatch:
 
@@ -16,82 +15,111 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: 下载 MC 26.2 client jar
+      - name: 下载 MC 26.2 client jar + 全部依赖库
         run: |
           set -e
-          mkdir -p deps
-          echo "=== 版本清单 ==="
-          MANIFEST=""
+          rm -rf deps && mkdir -p deps/libs
           for U in \
             "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" \
-            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json" \
-            "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"; do
-            echo "try $U"
+            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"; do
             if curl -fsSL -m 60 -A "curl/8" "$U" -o manifest.json; then
               if python3 -c "import json;d=json.load(open('manifest.json'));assert 'versions' in d" 2>/dev/null; then
-                MANIFEST="$U"; echo "OK: $U"; break
+                echo "manifest OK: $U"; break
               fi
             fi
           done
-          if [ -z "$MANIFEST" ]; then echo "所有清单源均失败"; exit 1; fi
-
           python3 - <<'PY'
           import json
           d = json.load(open('manifest.json'))
           hit = [v for v in d['versions'] if v['id'] == '26.2']
-          if not hit:
-              print('未找到 26.2，可用版本:', [v['id'] for v in d['versions'][:10]])
-              raise SystemExit(1)
-          print('found 26.2 ->', hit[0]['url'])
+          assert hit, 'no 26.2'
           open('vg_url.txt','w').write(hit[0]['url'])
           PY
-
           curl -fsSL -m 120 "$(cat vg_url.txt)" -o 26.2.json
-          python3 - <<'PY'
+          curl -fsSL -m 600 -A "curl/8" "$(python3 -c "import json;print(json.load(open('26.2.json'))['downloads']['client']['url'])")" -o deps/minecraft-26.2-client.jar
+
+          echo "=== 下载 libraries ==="
+          python3 - <<'PY' > lib_urls.txt
           import json
           d = json.load(open('26.2.json'))
-          print('version json keys:', list(d.keys()))
-          dl = d['downloads']['client']
-          print('client url:', dl['url'])
-          print('size:', dl['size'], 'sha1:', dl['sha1'])
-          open('client_url.txt','w').write(dl['url'])
+          for l in d.get('libraries', []):
+              # 只取通用 + client 可用的，跳过 natives-only 与 windows/osx 专用
+              rules = l.get('rules')
+              if rules:
+                  allowed = False
+                  for r in rules:
+                      act = r.get('action')
+                      os_ = (r.get('os') or {}).get('name')
+                      if act == 'allow' and os_ in (None, 'linux', 'osx', 'windows'):
+                          allowed = True
+                          break
+                  if not allowed:
+                      continue
+              a = (l.get('downloads') or {}).get('artifact')
+              if not a:
+                  continue
+              if (l.get('natives') or {}):
+                  continue
+              print(a['url'] + '\t' + a['path'].split('/')[-1])
           PY
+          wc -l lib_urls.txt
+          while IFS=$'\t' read -r URL NAME; do
+            [ -z "$URL" ] && continue
+            [ -f "deps/libs/$NAME" ] && continue
+            if curl -fsSL -m 120 "$URL" -o "deps/libs/$NAME"; then
+              echo "ok  $NAME"
+            else
+              echo "fail $NAME"; rm -f "deps/libs/$NAME"
+            fi
+          done < lib_urls.txt
+          ls deps/libs | wc -l
+          du -sh deps
 
-          curl -fsSL -m 600 -A "curl/8" "$(cat client_url.txt)" -o deps/minecraft-26.2-client.jar
-          ls -lh deps/
-          python3 -c "
-          import zipfile
-          z = zipfile.ZipFile('deps/minecraft-26.2-client.jar')
-          n = z.namelist()
-          print('entries:', len(n))
-          for x in ['net/minecraft/client/Minecraft.class','net/minecraft/client/multiplayer/ClientLevel.class','net/minecraft/client/player/LocalPlayer.class']:
-              print(x, x in n)
-          "
-
-      - name: 下载编译期依赖 (slf4j / mixin)
+      - name: 打包成单个 jar 便于下载
         run: |
           set -e
           mkdir -p deps
-          curl -fsSL -m 120 -o deps/slf4j-api.jar \
-            "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar" || \
-          curl -fsSL -m 120 -o deps/slf4j-api.jar \
-            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
-          curl -fsSL -m 120 -o deps/sponge-mixin.jar \
-            "https://maven.fabricmc.net/net/fabricmc/sponge-mixin/0.15.3+mixin.0.8.7/sponge-mixin-0.15.3+mixin.0.8.7.jar" || \
-          curl -fsSL -m 120 -o deps/sponge-mixin.jar \
-            "https://repo1.maven.org/maven2/org/spongepowered/mixin/0.8.7/mixin-0.8.7.jar"
-          curl -fsSL -m 120 -o deps/fabric-loader.jar \
-            "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar"
-          ls -lh deps/
+          cd deps/libs
+          # 合并所有 library 到一个 jar（避免逐一下载）
+          python3 - <<'PY'
+          import zipfile, os, glob
+          out = '../mc-deps-all.jar'
+          seen = set()
+          if os.path.exists(out): os.remove(out)
+          with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(glob.glob('*.jar')):
+                  try:
+                      with zipfile.ZipFile(f) as src:
+                          for n in src.namelist():
+                              if n.startswith('META-INF/') and ('SIG' in n.upper() or n.endswith('.SF') or n.endswith('.RSA') or n.endswith('.DSA')):
+                                  continue
+                              if n in seen: continue
+                              seen.add(n)
+                              try:
+                                  z.writestr(n, src.read(n))
+                              except Exception:
+                                  pass
+                  except Exception as e:
+                      print('skip', f, e)
+          print('entries:', len(seen))
+          PY
+          cd ..
+          ls -lh mc-deps-all.jar
+
+      - name: 额外依赖 (slf4j / mixin / loader)
+        run: |
+          set -e
+          curl -fsSL -m 120 -o deps/slf4j-api.jar "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
+          curl -fsSL -m 120 -o deps/sponge-mixin.jar "https://maven.fabricmc.net/net/fabricmc/sponge-mixin/0.15.3+mixin.0.8.7/sponge-mixin-0.15.3+mixin.0.8.7.jar"
+          curl -fsSL -m 120 -o deps/fabric-loader.jar "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar"
+          ls -lh deps
 
       - name: 提交
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A deps/
-          if git diff --staged --quiet; then
-            echo "无变化"
-          else
-            git commit -m "chore(deps): MC 26.2 client jar + 编译期依赖"
+          if git diff --staged --quiet; then echo "无变化"; else
+            git commit -m "chore(deps): MC 26.2 client + 全部 libraries"
             git push
           fi
