@@ -1,0 +1,97 @@
+name: Fetch MC 26.2 Deps
+
+# 抓取 MC 26.2 未混淆 client jar + 编译期依赖，供本地 javac 类型校验使用
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 下载 MC 26.2 client jar
+        run: |
+          set -e
+          mkdir -p deps
+          echo "=== 版本清单 ==="
+          MANIFEST=""
+          for U in \
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json" \
+            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json" \
+            "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"; do
+            echo "try $U"
+            if curl -fsSL -m 60 -A "curl/8" "$U" -o manifest.json; then
+              if python3 -c "import json;d=json.load(open('manifest.json'));assert 'versions' in d" 2>/dev/null; then
+                MANIFEST="$U"; echo "OK: $U"; break
+              fi
+            fi
+          done
+          if [ -z "$MANIFEST" ]; then echo "所有清单源均失败"; exit 1; fi
+
+          python3 - <<'PY'
+          import json
+          d = json.load(open('manifest.json'))
+          hit = [v for v in d['versions'] if v['id'] == '26.2']
+          if not hit:
+              print('未找到 26.2，可用版本:', [v['id'] for v in d['versions'][:10]])
+              raise SystemExit(1)
+          print('found 26.2 ->', hit[0]['url'])
+          open('vg_url.txt','w').write(hit[0]['url'])
+          PY
+
+          curl -fsSL -m 120 "$(cat vg_url.txt)" -o 26.2.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('26.2.json'))
+          print('version json keys:', list(d.keys()))
+          dl = d['downloads']['client']
+          print('client url:', dl['url'])
+          print('size:', dl['size'], 'sha1:', dl['sha1'])
+          open('client_url.txt','w').write(dl['url'])
+          PY
+
+          curl -fsSL -m 600 -A "curl/8" "$(cat client_url.txt)" -o deps/minecraft-26.2-client.jar
+          ls -lh deps/
+          python3 -c "
+          import zipfile
+          z = zipfile.ZipFile('deps/minecraft-26.2-client.jar')
+          n = z.namelist()
+          print('entries:', len(n))
+          for x in ['net/minecraft/client/Minecraft.class','net/minecraft/client/multiplayer/ClientLevel.class','net/minecraft/client/player/LocalPlayer.class']:
+              print(x, x in n)
+          "
+
+      - name: 下载编译期依赖 (slf4j / mixin)
+        run: |
+          set -e
+          mkdir -p deps
+          curl -fsSL -m 120 -o deps/slf4j-api.jar \
+            "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar" || \
+          curl -fsSL -m 120 -o deps/slf4j-api.jar \
+            "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
+          curl -fsSL -m 120 -o deps/sponge-mixin.jar \
+            "https://maven.fabricmc.net/net/fabricmc/sponge-mixin/0.15.3+mixin.0.8.7/sponge-mixin-0.15.3+mixin.0.8.7.jar" || \
+          curl -fsSL -m 120 -o deps/sponge-mixin.jar \
+            "https://repo1.maven.org/maven2/org/spongepowered/mixin/0.8.7/mixin-0.8.7.jar"
+          curl -fsSL -m 120 -o deps/fabric-loader.jar \
+            "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar"
+          ls -lh deps/
+
+      - name: 提交
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A deps/
+          if git diff --staged --quiet; then
+            echo "无变化"
+          else
+            git commit -m "chore(deps): MC 26.2 client jar + 编译期依赖"
+            git push
+          fi
