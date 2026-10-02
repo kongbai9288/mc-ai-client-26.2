@@ -102,16 +102,23 @@ jobs:
           curl -fsSL -m 120 -o deps/slf4j-api.jar "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
           curl -fsSL -m 120 -o deps/sponge-mixin.jar "https://maven.fabricmc.net/net/fabricmc/sponge-mixin/0.15.3+mixin.0.8.7/sponge-mixin-0.15.3+mixin.0.8.7.jar"
           curl -fsSL -m 120 -o deps/fabric-loader.jar "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar"
-          ls -lh deps
 
-      - name: 发布为 Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 分卷（避开单文件 100MB 限制）
         run: |
           set -e
           cd deps
-          gh release delete deps-26.2 --yes --cleanup-tag 2>/dev/null || true
-          gh release create deps-26.2 \
-            mc-deps-all.jar minecraft-26.2-client.jar slf4j-api.jar sponge-mixin.jar fabric-loader.jar \
-            --title "MC 26.2 编译依赖" --notes "自动抓取：client jar + 全部 libraries 合并包"
-          gh release view deps-26.2
+          rm -f mc-deps-all.jar.part-*
+          split -b 45m -d --additional-suffix=.bin mc-deps-all.jar mc-deps-all.jar.part-
+          rm -f mc-deps-all.jar
+          ls -lh .
+
+      - name: 提交
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A deps/
+          if git diff --staged --quiet; then echo "无变化"; else
+            git commit -m "chore(deps): MC 26.2 client + libraries（分卷）"
+            git push
+          fi
+          ls -lh deps
