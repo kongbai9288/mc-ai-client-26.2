@@ -1,0 +1,68 @@
+plugins {
+    // 26.1 起插件 id 变更：fabric-loom -> net.fabricmc.fabric-loom
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+    id 'java'
+}
+
+version      = project.mod_version
+group        = project.maven_group
+base.archivesName = "${project.archives_base_name}-mc${project.minecraft_version}"
+
+loom {
+    // 26.1 起无 intermediary 命名空间
+    noIntermediateMappings()
+}
+
+repositories {
+    maven { url 'https://maven.fabricmc.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    // Minecraft 本体由 Loom 从 Mojang 官方服务器拉取（遵守 EULA）
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    // 26.1 起：不写 mappings，写了会报
+    // "The mappings (...) were not built for Minecraft version 26.2"
+
+    // 独立运行：只依赖 fabric-loader，不依赖 Fabric API。
+    // 需要的 hooks 全部由本项目自带的 Mixin 提供。
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    // Baritone 不声明为外部依赖（保持独立）。
+    // 运行时通过 BaritoneLink 反射软探测：装了就用它的寻路，没装就用内置导航。
+    // 若需要本地联调，取消下一行注释并把 jar 放进 libs/：
+    // compileOnly files('libs/baritone-26.2.jar')
+
+    // ---- 可选增强（全部软探测，缺失不影响运行）----
+    // ViaFabricPlus 5.0.0+：一个客户端连 1.8 ~ 26.2 任意服务器
+    // compileOnly 'com.viaversion:viafabricplus-api:5.0.0'
+    // Litematica：投影与打印机（Easy Place）
+    // compileOnly files('libs/litematica-26.2.jar')
+}
+
+processResources {
+    inputs.property "version", project.version
+    filteringCharset "UTF-8"
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version,
+               "minecraft_version": project.minecraft_version,
+               "loader_version": project.loader_version,
+               "java_version": project.java_version
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+    // 26.1 起不要 withSourcesJar()：无 intermediary，remapSourcesJar 无法工作
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 25
+    it.options.encoding = "UTF-8"
+}
+
+// 26.1 起产物用 jar 任务，不再有 remapJar
+jar {
+    from("LICENSE") { rename { "${it}_${project.base.archivesName.get()}" } }
+}
