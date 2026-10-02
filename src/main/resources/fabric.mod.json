@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "mcai",
+  "version": "${version}",
+  "name": "MCAI - AI Plays Minecraft",
+  "description": "让 AI 真正操控 Minecraft：感知-决策-执行三层架构，OpenAI 兼容接口，本地 HTTP/MCP API，独立运行不依赖 Fabric API",
+  "authors": ["kongbai9288"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.kongbai.mcai.McAiMod"
+    ]
+  },
+  "mixins": [
+    "mixins.mcai.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "minecraft": "${minecraft_version}",
+    "java": ">=${java_version}"
+  },
+  "suggests": {}
+}
