@@ -37,13 +37,12 @@ jobs:
           PY
           curl -fsSL -m 120 "$(cat vg_url.txt)" -o 26.2.json
           curl -fsSL -m 600 -A "curl/8" "$(python3 -c "import json;print(json.load(open('26.2.json'))['downloads']['client']['url'])")" -o deps/minecraft-26.2-client.jar
-
+          ls -lh deps/minecraft-26.2-client.jar
           echo "=== 下载 libraries ==="
           python3 - <<'PY' > lib_urls.txt
           import json
           d = json.load(open('26.2.json'))
           for l in d.get('libraries', []):
-              # 只取通用 + client 可用的，跳过 natives-only 与 windows/osx 专用
               rules = l.get('rules')
               if rules:
                   allowed = False
@@ -56,57 +55,48 @@ jobs:
                   if not allowed:
                       continue
               a = (l.get('downloads') or {}).get('artifact')
-              if not a:
-                  continue
-              if (l.get('natives') or {}):
-                  continue
+              if not a: continue
+              if (l.get('natives') or {}): continue
               print(a['url'] + '\t' + a['path'].split('/')[-1])
           PY
           wc -l lib_urls.txt
-          while IFS=$'\t' read -r URL NAME; do
+          while IFS=$(printf '\t') read -r URL NAME; do
             [ -z "$URL" ] && continue
             [ -f "deps/libs/$NAME" ] && continue
-            if curl -fsSL -m 120 "$URL" -o "deps/libs/$NAME"; then
-              echo "ok  $NAME"
-            else
-              echo "fail $NAME"; rm -f "deps/libs/$NAME"
-            fi
+            curl -fsSL -m 120 "$URL" -o "deps/libs/$NAME" || rm -f "deps/libs/$NAME"
           done < lib_urls.txt
-          ls deps/libs | wc -l
-          du -sh deps
+          echo "libs: $(ls deps/libs | wc -l)"
 
-      - name: 打包成单个 jar 便于下载
+      - name: 合并为单个 jar
         run: |
           set -e
-          mkdir -p deps
           cd deps/libs
-          # 合并所有 library 到一个 jar（避免逐一下载）
           python3 - <<'PY'
           import zipfile, os, glob
           out = '../mc-deps-all.jar'
-          seen = set()
           if os.path.exists(out): os.remove(out)
+          seen = set()
           with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
               for f in sorted(glob.glob('*.jar')):
                   try:
                       with zipfile.ZipFile(f) as src:
                           for n in src.namelist():
-                              if n.startswith('META-INF/') and ('SIG' in n.upper() or n.endswith('.SF') or n.endswith('.RSA') or n.endswith('.DSA')):
+                              u = n.upper()
+                              if n.startswith('META-INF/') and ('SIG' in u or n.endswith('.SF') or n.endswith('.RSA') or n.endswith('.DSA')):
                                   continue
                               if n in seen: continue
                               seen.add(n)
-                              try:
-                                  z.writestr(n, src.read(n))
-                              except Exception:
-                                  pass
+                              try: z.writestr(n, src.read(n))
+                              except Exception: pass
                   except Exception as e:
                       print('skip', f, e)
           print('entries:', len(seen))
           PY
           cd ..
-          ls -lh mc-deps-all.jar
+          rm -rf libs
+          ls -lh .
 
-      - name: 额外依赖 (slf4j / mixin / loader)
+      - name: 额外依赖
         run: |
           set -e
           curl -fsSL -m 120 -o deps/slf4j-api.jar "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar"
@@ -114,12 +104,14 @@ jobs:
           curl -fsSL -m 120 -o deps/fabric-loader.jar "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar"
           ls -lh deps
 
-      - name: 提交
+      - name: 发布为 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A deps/
-          if git diff --staged --quiet; then echo "无变化"; else
-            git commit -m "chore(deps): MC 26.2 client + 全部 libraries"
-            git push
-          fi
+          set -e
+          cd deps
+          gh release delete deps-26.2 --yes --cleanup-tag 2>/dev/null || true
+          gh release create deps-26.2 \
+            mc-deps-all.jar minecraft-26.2-client.jar slf4j-api.jar sponge-mixin.jar fabric-loader.jar \
+            --title "MC 26.2 编译依赖" --notes "自动抓取：client jar + 全部 libraries 合并包"
+          gh release view deps-26.2
